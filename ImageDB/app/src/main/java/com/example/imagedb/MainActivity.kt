@@ -5,26 +5,48 @@ import android.app.Activity
 import android.content.DialogInterface
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.Cursor
+import android.database.sqlite.SQLiteDatabase
+import android.database.sqlite.SQLiteStatement
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
 import android.net.Uri
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import com.example.imagedb.db.Constants
+import com.example.imagedb.db.SQLiteDBHelper
 import kotlinx.android.synthetic.main.activity_main.*
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
+import java.nio.Buffer
+import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
 
+// TODO : ImageSize ImageView 사이즈에 맞추던가, ImageView 사이즈를 이미지에 맞추던가(adjustViewBounds = true)
+
 // java.lang.IllegalArgumentException: Failed to find configured root that contains /storage/emulated/0/Pictures/ImageDB/JPEG_20210801_113705.jpg
 // Manifest 와 file_paths 의 경로는 내 패키지여야 함
+
+
+/*
+iv_setIamge.drawable.constantState == resources.drawable(R.drawable.ic_~~foreground).getConstantState
+로 비교하여 이미지 세팅 안 한 것 체크 할 수 있음!
+ */
 class MainActivity : AppCompatActivity() {
 
     // 카메라와 앨범 접근 권한에 필요한 변수들
@@ -35,7 +57,7 @@ class MainActivity : AppCompatActivity() {
     )
     val PERMISSION_CAMERA = 1
     val PERMISSION_STORAGE = 2
-    val REQUEST_CAMERA = 3
+    // val REQUEST_CAMERA = 3
     val REQUEST_STORAGE = 4
 
     val REQUEST_TAKE_PHOTO = 1
@@ -46,20 +68,20 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         // 여기를 클릭하여 앨범 혹은 카메라로부터 이미지 가져오기
-        iv_setIamge.setOnClickListener {
+        iv_setImage.setOnClickListener {
             getImage()
         }
 
         // et_saveFlag 의 텍스트를 입력값으로 받아서 DB 에 이미지 저장하기
         // 여기를 클릭하여 이미지와 플래그를 저장하기
         btn_save.setOnClickListener {
-
+            saveImage()
         }
 
         // et_searchFlag 의 텍스트를 입력값으로 받아서 DB 에서 이미지 가져오기
         // 여기를 클릭하여 이미지 가져와 아래 iv_getImage 에 세팅하기
         btn_load.setOnClickListener {
-
+            getImageFromDB()
         }
     }
 
@@ -69,7 +91,8 @@ class MainActivity : AppCompatActivity() {
         val timeStamp: String = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
         val imageFileName = "JPEG_$timeStamp.jpg"
         var imageFile: File? = null
-        val storageDir = File(Environment.getExternalStorageDirectory().toString() + "/Pictures", "ImageDB")
+        val storageDir =
+            File(Environment.getExternalStorageDirectory().toString() + "/Pictures", "ImageDB")
         if (!storageDir.exists()) {
             Log.i("mCurrentPhotoPath1", storageDir.toString())
             storageDir.mkdirs()
@@ -82,7 +105,11 @@ class MainActivity : AppCompatActivity() {
     // 권한 승인했는지 확인
     private fun checkPermission(permissions: Array<out String>, flag: Int): Boolean {
         for (permission in permissions) {
-            if (ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    permission
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
                 ActivityCompat.requestPermissions(this, permissions, flag)
                 return false
             }
@@ -148,12 +175,12 @@ class MainActivity : AppCompatActivity() {
             when (requestCode) {
                 REQUEST_STORAGE -> {
                     val uri = data?.data
-                    iv_setIamge.setImageURI(uri)
+                    iv_setImage.setImageURI(uri)
                 }
-                REQUEST_CAMERA -> {
-                    val bitmap = data?.extras?.get("data") as Bitmap
-                    iv_setIamge.setImageBitmap(bitmap)
-                }
+                // REQUEST_CAMERA -> {
+                //     val bitmap = data?.extras?.get("data") as Bitmap
+                //     iv_setImage.setImageBitmap(bitmap)
+                // }
                 REQUEST_TAKE_PHOTO -> {
                     Log.i("REQUEST_TAKE_PHOTO", "${Activity.RESULT_OK}" + " " + "${resultCode}");
                     if (resultCode == RESULT_OK) {
@@ -164,7 +191,8 @@ class MainActivity : AppCompatActivity() {
                         }
 
                     } else {
-                        Toast.makeText(this@MainActivity, "사진찍기를 취소하였습니다.", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(this@MainActivity, "사진찍기를 취소하였습니다.", Toast.LENGTH_SHORT)
+                            .show();
                     }
                 }
             }
@@ -183,6 +211,35 @@ class MainActivity : AppCompatActivity() {
         Toast.makeText(this, "사진이 앨범에 저장되었습니다.", Toast.LENGTH_SHORT).show()
 
         // 로컬에 저장한 이미지 이미지뷰에 세팅
-        iv_setIamge.setImageURI(contentUri)
+        iv_setImage.setImageURI(contentUri)
+    }
+
+    fun saveImage() {
+        // 이미지 리소스 비트맵 변환
+        val bitmapImage: Bitmap = (iv_setImage.drawable as BitmapDrawable).bitmap
+        val resizedImage: Bitmap = Bitmap.createScaledBitmap(bitmapImage, iv_setImage.width, iv_setImage.height, true)
+        // bitmap/drawable -> BLOB (byte[])
+        val stream = ByteArrayOutputStream()
+        resizedImage.compress(Bitmap.CompressFormat.PNG, 100, stream)
+        val convertedImage: ByteArray = stream.toByteArray()
+
+        val dbHelper = SQLiteDBHelper(this, Constants.DB_NAME, null, 1)
+        val database: SQLiteDatabase = dbHelper.writableDatabase
+        val sql: String = Constants.insertImageQuery(et_saveFlag.text.toString(), "?")
+        val sqliteStatement: SQLiteStatement = database.compileStatement(sql)
+        sqliteStatement.bindBlob(1, convertedImage)
+        sqliteStatement.execute()
+    }
+
+    fun getImageFromDB() {
+        val dbHelper = SQLiteDBHelper(this, Constants.DB_NAME, null, 1)
+        val database: SQLiteDatabase = dbHelper.readableDatabase
+        val sql: String = Constants.getImageQuery(et_searchFlag.text.toString())
+        val result: Cursor = database.rawQuery(sql, null)
+        if (result.moveToNext()) {
+            val imageFromDB: ByteArray = result.getBlob(result.getColumnIndex(Constants.COL_IMAGE))
+            val bitmapImage: Bitmap = BitmapFactory.decodeByteArray(imageFromDB, 0, imageFromDB.size)
+            iv_getImage.setImageBitmap(bitmapImage)
+        }
     }
 }
